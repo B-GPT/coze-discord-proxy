@@ -2,8 +2,10 @@ package controller
 
 import (
 	"coze-discord-proxy/common"
+	"coze-discord-proxy/common/config"
 	"coze-discord-proxy/discord"
 	"coze-discord-proxy/model"
+	"coze-discord-proxy/telegram"
 	"encoding/json"
 	"fmt"
 	"github.com/gin-gonic/gin"
@@ -68,7 +70,7 @@ import (
 //	discord.ReplyStopChans[sentMsg.ID] = stopChan
 //	defer delete(discord.ReplyStopChans, sentMsg.ID)
 //
-//	timer, err := setTimerWithHeader(c, chatModel.Stream, common.RequestOutTimeDuration)
+//	timer, err := setTimerWithHeader(c, chatModel.Stream, config.RequestOutTimeDuration)
 //	if err != nil {
 //		common.LogError(c.Request.Context(), err.Error())
 //		c.JSON(http.StatusBadRequest, gin.H{
@@ -82,7 +84,7 @@ import (
 //		c.Stream(func(w io.Writer) bool {
 //			select {
 //			case reply := <-replyChan:
-//				timerReset(c, chatModel.Stream, timer, common.RequestOutTimeDuration)
+//				timerReset(c, chatModel.Stream, timer, config.RequestOutTimeDuration)
 //				urls := ""
 //				if len(reply.EmbedUrls) > 0 {
 //					for _, url := range reply.EmbedUrls {
@@ -139,9 +141,20 @@ func ChatForOpenAI(c *gin.Context) {
 	err := json.NewDecoder(c.Request.Body).Decode(&request)
 	if err != nil {
 		common.LogError(c.Request.Context(), err.Error())
-		c.JSON(http.StatusOK, model.OpenAIErrorResponse{
+		c.JSON(http.StatusInternalServerError, model.OpenAIErrorResponse{
 			OpenAIError: model.OpenAIError{
 				Message: "Invalid request parameters",
+				Type:    "request_error",
+				Code:    "500",
+			},
+		})
+		return
+	}
+
+	if err := checkUserAuths(c); err != nil {
+		c.JSON(http.StatusInternalServerError, model.OpenAIErrorResponse{
+			OpenAIError: model.OpenAIError{
+				Message: err.Error(),
 				Type:    "request_error",
 				Code:    "500",
 			},
@@ -153,7 +166,7 @@ func ChatForOpenAI(c *gin.Context) {
 
 	if err != nil {
 		common.LogError(c.Request.Context(), err.Error())
-		c.JSON(http.StatusOK, model.OpenAIErrorResponse{
+		c.JSON(http.StatusInternalServerError, model.OpenAIErrorResponse{
 			OpenAIError: model.OpenAIError{
 				Message: "config error,check logs",
 				Type:    "request_error",
@@ -189,7 +202,7 @@ loop:
 		if message.Role == "user" {
 			switch contentObj := message.Content.(type) {
 			case string:
-				if common.AllDialogRecordEnable == "1" || common.AllDialogRecordEnable == "" {
+				if config.AllDialogRecordEnable == "1" || config.AllDialogRecordEnable == "" {
 					messages[i] = model.OpenAIChatMessage{
 						Role:    "user",
 						Content: contentObj,
@@ -201,7 +214,7 @@ loop:
 			case []interface{}:
 				content, err = buildOpenAIGPT4VForImageContent(sendChannelId, contentObj)
 				if err != nil {
-					c.JSON(http.StatusOK, model.OpenAIErrorResponse{
+					c.JSON(http.StatusInternalServerError, model.OpenAIErrorResponse{
 						OpenAIError: model.OpenAIError{
 							Message: "Image URL parsing error",
 							Type:    "request_error",
@@ -210,7 +223,7 @@ loop:
 					})
 					return
 				}
-				if common.AllDialogRecordEnable == "1" || common.AllDialogRecordEnable == "" {
+				if config.AllDialogRecordEnable == "1" || config.AllDialogRecordEnable == "" {
 					messages[i] = model.OpenAIChatMessage{
 						Role:    "user",
 						Content: content,
@@ -219,7 +232,7 @@ loop:
 					break loop
 				}
 			default:
-				c.JSON(http.StatusOK, model.OpenAIErrorResponse{
+				c.JSON(http.StatusInternalServerError, model.OpenAIErrorResponse{
 					OpenAIError: model.OpenAIError{
 						Message: "Message format error",
 						Type:    "request_error",
@@ -238,7 +251,7 @@ loop:
 		}
 	}
 
-	if common.AllDialogRecordEnable == "1" || common.AllDialogRecordEnable == "" {
+	if config.AllDialogRecordEnable == "1" || config.AllDialogRecordEnable == "" {
 		jsonData, err := json.Marshal(messages)
 		if err != nil {
 			c.JSON(http.StatusOK, gin.H{
@@ -250,51 +263,9 @@ loop:
 		content = string(jsonData)
 	}
 
-	//for i := len(messages) - 1; i >= 0; i-- {
-	//	message := messages[i]
-	//	if message.Role == "user" {
-	//		switch contentObj := message.Content.(type) {
-	//		case string:
-	//			if common.AllDialogRecordEnable == "1" {
-	//				content = contentObj
-	//			} else {
-	//				jsonData, err := json.Marshal(messages)
-	//				if err != nil {
-	//					c.JSON(http.StatusOK, gin.H{
-	//						"success": false,
-	//						"message": err.Error(),
-	//					})
-	//					return
-	//				}
-	//				content = string(jsonData)
-	//			}
-	//		case []interface{}:
-	//			content, err = buildOpenAIGPT4VForImageContent(sendChannelId, contentObj)
-	//			if err != nil {
-	//				c.JSON(http.StatusOK, gin.H{
-	//					"success": false,
-	//					"message": err.Error(),
-	//				})
-	//				return
-	//			}
-	//		default:
-	//			c.JSON(http.StatusOK, model.OpenAIErrorResponse{
-	//				OpenAIError: model.OpenAIError{
-	//					Message: "消息格式异常",
-	//					Type:    "invalid_request_error",
-	//					Code:    "discord_request_err",
-	//				},
-	//			})
-	//			return
-	//
-	//		}
-	//		break
-	//	}
-	//}
-
 	sentMsg, userAuth, err := discord.SendMessage(c, sendChannelId, calledCozeBotId, content)
 	if err != nil {
-		c.JSON(http.StatusOK, model.OpenAIErrorResponse{
+		c.JSON(http.StatusInternalServerError, model.OpenAIErrorResponse{
 			OpenAIError: model.OpenAIError{
 				Message: err.Error(),
 				Type:    "request_error",
@@ -312,7 +283,7 @@ loop:
 	discord.ReplyStopChans[sentMsg.ID] = stopChan
 	defer delete(discord.ReplyStopChans, sentMsg.ID)
 
-	timer, err := setTimerWithHeader(c, request.Stream, common.RequestOutTimeDuration)
+	timer, err := setTimerWithHeader(c, request.Stream, config.RequestOutTimeDuration)
 	if err != nil {
 		common.LogError(c.Request.Context(), err.Error())
 		c.JSON(http.StatusBadRequest, gin.H{
@@ -327,7 +298,7 @@ loop:
 		c.Stream(func(w io.Writer) bool {
 			select {
 			case reply := <-replyChan:
-				timerReset(c, request.Stream, timer, common.RequestOutTimeDuration)
+				timerReset(c, request.Stream, timer, config.RequestOutTimeDuration)
 
 				// TODO 多张图片问题
 				if !strings.HasPrefix(reply.Choices[0].Message.Content, strLen) {
@@ -354,7 +325,6 @@ loop:
 						common.LogWarn(c, fmt.Sprintf("USER_AUTHORIZATION:%s DAILY LIMIT", userAuth))
 						discord.UserAuthorizations = common.FilterSlice(discord.UserAuthorizations, userAuth)
 					}
-					//discord.SetChannelDeleteTimer(sendChannelId, 5*time.Second)
 					c.SSEvent("", " [DONE]")
 					return false // 关闭流式连接
 				}
@@ -362,7 +332,6 @@ loop:
 				return true // 继续保持流式连接
 			case <-timer.C:
 				// 定时器到期时,关闭流
-				//discord.SetChannelDeleteTimer(sendChannelId, 5*time.Second)
 				c.SSEvent("", " [DONE]")
 				return false
 			case <-stopChan:
@@ -380,8 +349,7 @@ loop:
 						common.LogWarn(c, fmt.Sprintf("USER_AUTHORIZATION:%s DAILY LIMIT", userAuth))
 						discord.UserAuthorizations = common.FilterSlice(discord.UserAuthorizations, userAuth)
 					}
-					//discord.SetChannelDeleteTimer(sendChannelId, 5*time.Second)
-					c.JSON(http.StatusOK, model.OpenAIErrorResponse{
+					c.JSON(http.StatusInternalServerError, model.OpenAIErrorResponse{
 						OpenAIError: model.OpenAIError{
 							Message: reply.Choices[0].Message.Content,
 							Type:    "request_error",
@@ -392,14 +360,7 @@ loop:
 				}
 				replyResp = reply
 			case <-timer.C:
-				//discord.SetChannelDeleteTimer(sendChannelId, 5*time.Second)
-				c.JSON(http.StatusOK, model.OpenAIErrorResponse{
-					OpenAIError: model.OpenAIError{
-						Message: "Request timeout",
-						Type:    "request_error",
-						Code:    "500",
-					},
-				})
+				c.JSON(http.StatusOK, replyResp)
 				return
 			case <-stopChan:
 				c.JSON(http.StatusOK, replyResp)
@@ -468,7 +429,7 @@ func ImagesForOpenAI(c *gin.Context) {
 	err := json.NewDecoder(c.Request.Body).Decode(&request)
 	if err != nil {
 		common.LogError(c.Request.Context(), err.Error())
-		c.JSON(http.StatusOK, model.OpenAIErrorResponse{
+		c.JSON(http.StatusInternalServerError, model.OpenAIErrorResponse{
 			OpenAIError: model.OpenAIError{
 				Message: "Invalid request parameters",
 				Type:    "request_error",
@@ -486,10 +447,21 @@ func ImagesForOpenAI(c *gin.Context) {
 		return
 	}
 
+	if err := checkUserAuths(c); err != nil {
+		c.JSON(http.StatusInternalServerError, model.OpenAIErrorResponse{
+			OpenAIError: model.OpenAIError{
+				Message: err.Error(),
+				Type:    "request_error",
+				Code:    "500",
+			},
+		})
+		return
+	}
+
 	sendChannelId, calledCozeBotId, isNewChannel, err := getSendChannelIdAndCozeBotId(c, request.ChannelId, request.Model, true)
 	if err != nil {
 		common.LogError(c.Request.Context(), err.Error())
-		c.JSON(http.StatusOK, model.OpenAIErrorResponse{
+		c.JSON(http.StatusInternalServerError, model.OpenAIErrorResponse{
 			OpenAIError: model.OpenAIError{
 				Message: "config error",
 				Type:    "request_error",
@@ -518,7 +490,7 @@ func ImagesForOpenAI(c *gin.Context) {
 
 	sentMsg, userAuth, err := discord.SendMessage(c, sendChannelId, calledCozeBotId, request.Prompt)
 	if err != nil {
-		c.JSON(http.StatusOK, model.OpenAIErrorResponse{
+		c.JSON(http.StatusInternalServerError, model.OpenAIErrorResponse{
 			OpenAIError: model.OpenAIError{
 				Message: err.Error(),
 				Type:    "request_error",
@@ -536,7 +508,7 @@ func ImagesForOpenAI(c *gin.Context) {
 	discord.ReplyStopChans[sentMsg.ID] = stopChan
 	defer delete(discord.ReplyStopChans, sentMsg.ID)
 
-	timer, err := setTimerWithHeader(c, false, common.RequestOutTimeDuration)
+	timer, err := setTimerWithHeader(c, false, config.RequestOutTimeDuration)
 	if err != nil {
 		common.LogError(c.Request.Context(), err.Error())
 		c.JSON(http.StatusBadRequest, gin.H{
@@ -552,8 +524,7 @@ func ImagesForOpenAI(c *gin.Context) {
 			if reply.DailyLimit {
 				common.LogWarn(c, fmt.Sprintf("USER_AUTHORIZATION:%s DAILY LIMIT", userAuth))
 				discord.UserAuthorizations = common.FilterSlice(discord.UserAuthorizations, userAuth)
-				//discord.SetChannelDeleteTimer(sendChannelId, 5*time.Second)
-				c.JSON(http.StatusOK, model.OpenAIErrorResponse{
+				c.JSON(http.StatusInternalServerError, model.OpenAIErrorResponse{
 					OpenAIError: model.OpenAIError{
 						Message: "daily limit for sending messages",
 						Type:    "request_error",
@@ -564,18 +535,21 @@ func ImagesForOpenAI(c *gin.Context) {
 			}
 			replyResp = reply
 		case <-timer.C:
-			//discord.SetChannelDeleteTimer(sendChannelId, 5*time.Second)
-			c.JSON(http.StatusOK, model.OpenAIErrorResponse{
-				OpenAIError: model.OpenAIError{
-					Message: "Request timed out, please try again later.",
-					Type:    "request_error",
-					Code:    "500",
-				},
-			})
+			if replyResp.Data == nil {
+				c.JSON(http.StatusInternalServerError, model.OpenAIErrorResponse{
+					OpenAIError: model.OpenAIError{
+						Message: "Failed to fetch image URL, please try again later.",
+						Type:    "request_error",
+						Code:    "500",
+					},
+				})
+				return
+			}
+			c.JSON(http.StatusOK, replyResp)
 			return
 		case <-stopChan:
 			if replyResp.Data == nil {
-				c.JSON(http.StatusOK, model.OpenAIErrorResponse{
+				c.JSON(http.StatusInternalServerError, model.OpenAIErrorResponse{
 					OpenAIError: model.OpenAIError{
 						Message: "Failed to fetch image URL, please try again later.",
 						Type:    "request_error",
@@ -620,7 +594,7 @@ func getSendChannelIdAndCozeBotId(c *gin.Context, channelId *string, model strin
 				return botConfig.ChannelId, botConfig.CozeBotId, false, nil
 			} else {
 				var sendChannelId string
-				sendChannelId, err := discord.CreateChannelWithRetry(c, discord.GuildId, fmt.Sprintf("cdp-对话%s", c.Request.Context().Value(common.RequestIdKey)), 0)
+				sendChannelId, err := discord.CreateChannelWithRetry(c, discord.GuildId, fmt.Sprintf("cdp-chat-%s", c.Request.Context().Value(common.RequestIdKey)), 0)
 				if err != nil {
 					common.LogError(c, err.Error())
 					return "", "", false, err
@@ -640,9 +614,9 @@ func getSendChannelIdAndCozeBotId(c *gin.Context, channelId *string, model strin
 		if discord.DefaultChannelEnable == "1" {
 			return discord.ChannelId, discord.CozeBotId, false, nil
 		} else {
-			sendChannelId, err := discord.CreateChannelWithRetry(c, discord.GuildId, fmt.Sprintf("cdp-对话%s", c.Request.Context().Value(common.RequestIdKey)), 0)
+			sendChannelId, err := discord.CreateChannelWithRetry(c, discord.GuildId, fmt.Sprintf("cdp-chat-%s", c.Request.Context().Value(common.RequestIdKey)), 0)
 			if err != nil {
-				common.LogError(c, err.Error())
+				//common.LogError(c, err.Error())
 				return "", "", false, err
 			}
 			return sendChannelId, discord.CozeBotId, true, nil
@@ -670,9 +644,9 @@ func getOutTimeStr(c *gin.Context, isStream bool) string {
 		outTimeStr = outTime
 	} else {
 		if isStream {
-			outTimeStr = common.StreamRequestOutTime
+			outTimeStr = config.StreamRequestOutTime
 		} else {
-			outTimeStr = common.RequestOutTime
+			outTimeStr = config.RequestOutTime
 		}
 	}
 	return outTimeStr
@@ -691,5 +665,19 @@ func timerReset(c *gin.Context, isStream bool, timer *time.Timer, defaultTimeout
 		return nil
 	}
 	timer.Reset(defaultTimeout)
+	return nil
+}
+
+func checkUserAuths(c *gin.Context) error {
+	if len(discord.UserAuthorizations) == 0 {
+		common.LogError(c, fmt.Sprintf("无可用的 user_auth"))
+		// tg发送通知
+		if telegram.NotifyTelegramBotToken != "" && telegram.TgBot != nil {
+			go func() {
+				discord.NoAvailableUserAuthChan <- "stop"
+			}()
+		}
+		return fmt.Errorf("no_available_user_auth")
+	}
 	return nil
 }
